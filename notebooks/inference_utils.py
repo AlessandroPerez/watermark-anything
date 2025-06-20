@@ -78,26 +78,31 @@ def load_model_from_checkpoint(json_path, ckpt_path):
     return wam
 
 
-
-def create_random_mask(img_pt, num_masks=1, mask_percentage=0.1):
+def create_random_mask(img_pt, num_masks=1, mask_percentage=0.1, max_attempts=100):
     _, _, height, width = img_pt.shape
     mask_area = int(height * width * mask_percentage)
     masks = torch.zeros((num_masks, 1, height, width), dtype=img_pt.dtype)
+
+    if mask_percentage >= 0.999:
+        # Full mask for entire image
+        return torch.ones((num_masks, 1, height, width), dtype=img_pt.dtype).to(img_pt.device)
+
     for ii in range(num_masks):
         placed = False
-        while not placed:
-            # Calculate maximum possible dimensions
+        attempts = 0
+        while not placed and attempts < max_attempts:
+            attempts += 1
+
             max_dim = int(mask_area ** 0.5)
             mask_width = random.randint(1, max_dim)
             mask_height = mask_area // mask_width
-            # Ensure the ratio is between 1/2 and 1/4
-            if 1/2 <= mask_width / mask_height <= 1:
-                # Ensure dimensions fit within the image
+
+            # Allow broader aspect ratios for larger masks
+            aspect_ratio = mask_width / mask_height if mask_height != 0 else 0
+            if 0.25 <= aspect_ratio <= 4:  # Looser ratio constraint
                 if mask_height <= height and mask_width <= width:
-                    # Randomly select top-left corner
                     x_start = random.randint(0, width - mask_width)
                     y_start = random.randint(0, height - mask_height)
-                    # Check for overlap with existing masks
                     overlap = False
                     for jj in range(ii):
                         if torch.sum(masks[jj, :, y_start:y_start + mask_height, x_start:x_start + mask_width]) > 0:
@@ -106,6 +111,17 @@ def create_random_mask(img_pt, num_masks=1, mask_percentage=0.1):
                     if not overlap:
                         masks[ii, :, y_start:y_start + mask_height, x_start:x_start + mask_width] = 1
                         placed = True
+
+        if not placed:
+            # Fallback: just fill a central region if all attempts fail
+            print(f"Warning: Failed to place mask {ii}, using fallback.")
+            center_h = height // 2
+            center_w = width // 2
+            half_area = int((mask_area // 2) ** 0.5)
+            h_half = min(center_h, half_area)
+            w_half = min(center_w, half_area)
+            masks[ii, :, center_h - h_half:center_h + h_half, center_w - w_half:center_w + w_half] = 1
+
     return masks.to(img_pt.device)
 
 def multiwm_dbscan(preds: torch.Tensor, masks: torch.Tensor = None, gt_masks= None, threshold: float = 0.0, epsilon = 1, min_samples = 3000) -> torch.Tensor:
